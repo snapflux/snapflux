@@ -380,7 +380,7 @@ func TestTwoBrokersPeerUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected hard error (expected HTTP 503): %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when peer is unreachable, got %d", resp.StatusCode)
@@ -488,7 +488,7 @@ func TestBrokerHealthEndpointReflectsDegradedRing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /health: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Single-node ring is valid; health should be ok.
 	if resp.StatusCode != http.StatusOK {
@@ -514,7 +514,7 @@ func TestClientSlowBodyReadTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("health check: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	// Test passes as long as the server stays responsive (no hung goroutine).
 }
 
@@ -533,7 +533,7 @@ func TestClientOversizedBodyRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for oversized body, got %d", resp.StatusCode)
