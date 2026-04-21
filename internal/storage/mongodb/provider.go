@@ -374,8 +374,7 @@ func ignoreDuplicates(err error) error {
 	if err == nil {
 		return nil
 	}
-	var bwe mongo.BulkWriteException
-	if errors.As(err, &bwe) {
+	if bwe, ok := errors.AsType[mongo.BulkWriteException](err); ok {
 		for _, we := range bwe.WriteErrors {
 			if we.Code != 11000 {
 				return err
