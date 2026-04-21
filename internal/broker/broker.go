@@ -3,8 +3,10 @@ package broker
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -19,6 +21,7 @@ type Broker struct {
 	cfg          *config.Config
 	id           string
 	address      string
+	ringMu       sync.RWMutex
 	ring         *HashRing
 	cancelTimers context.CancelFunc
 
@@ -63,8 +66,10 @@ func (b *Broker) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	b.ringMu.Lock()
 	b.ring = newHashRing(brokers)
-	slog.Info("broker registered", "id", b.id, "address", b.address, "ringSize", b.ring.nodeCount())
+	b.ringMu.Unlock()
+	slog.Info("broker registered", "id", b.id, "address", b.address, "ringSize", b.NodeCount())
 
 	tickerCtx, cancel := context.WithCancel(context.Background())
 	b.cancelTimers = cancel
@@ -86,7 +91,13 @@ func (b *Broker) Stop(ctx context.Context) {
 }
 
 func (b *Broker) IsSelf(key string) bool {
-	node, err := b.ring.getNode(key)
+	b.ringMu.RLock()
+	r := b.ring
+	b.ringMu.RUnlock()
+	if r == nil {
+		return true
+	}
+	node, err := r.getNode(key)
 	if err != nil {
 		return true
 	}
@@ -94,14 +105,23 @@ func (b *Broker) IsSelf(key string) bool {
 }
 
 func (b *Broker) GetNode(key string) (storage.BrokerEntity, error) {
-	return b.ring.getNode(key)
+	b.ringMu.RLock()
+	r := b.ring
+	b.ringMu.RUnlock()
+	if r == nil {
+		return storage.BrokerEntity{}, errors.New("ring not initialised")
+	}
+	return r.getNode(key)
 }
 
 func (b *Broker) NodeCount() int {
-	if b.ring == nil {
+	b.ringMu.RLock()
+	r := b.ring
+	b.ringMu.RUnlock()
+	if r == nil {
 		return 0
 	}
-	return b.ring.nodeCount()
+	return r.nodeCount()
 }
 
 func (b *Broker) runHeartbeat(ctx context.Context, interval time.Duration) {
@@ -151,11 +171,15 @@ func (b *Broker) evictAndRecompute() {
 		return
 	}
 
-	if len(evicted) == 0 && len(brokers) == b.ring.nodeCount() {
+	b.ringMu.Lock()
+	unchanged := len(evicted) == 0 && b.ring != nil && len(brokers) == b.ring.nodeCount()
+	if !unchanged {
+		b.ring = newHashRing(brokers)
+	}
+	b.ringMu.Unlock()
+	if unchanged {
 		return
 	}
-
-	b.ring = newHashRing(brokers)
 	b.ringRecomputes.Add(ctx, 1)
 	if len(evicted) > 0 {
 		b.evictions.Add(ctx, int64(len(evicted)))

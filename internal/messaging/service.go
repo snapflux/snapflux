@@ -88,7 +88,9 @@ func (s *Service) Send(ctx context.Context, topic, key string, body any, forward
 		}
 		slog.Debug("forwarding send", "topic", topic, "key", key, "target", target.Address)
 		s.forwarded.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "send")))
-		return s.forwardSend(ctx, target, topic, model.SendRequest{Key: key, Body: body, Durability: durability})
+		return forwardWithRetry(func() (model.SendResponse, error) {
+			return s.forwardSend(ctx, target, topic, model.SendRequest{Key: key, Body: body, Durability: durability})
+		})
 	}
 
 	msgID := rand.Text()
@@ -171,7 +173,9 @@ func (s *Service) Receive(ctx context.Context, topic, group string, limit int, f
 		}
 		slog.Debug("forwarding receive", "topic", topic, "group", group, "target", target.Address)
 		s.forwarded.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "receive")))
-		return s.forwardReceive(ctx, target, topic, group, limit)
+		return forwardWithRetry(func() ([]model.MessageResponse, error) {
+			return s.forwardReceive(ctx, target, topic, group, limit)
+		})
 	}
 
 	if err := s.store.UpsertSubscription(ctx, topic, group); err != nil {
@@ -224,7 +228,9 @@ func (s *Service) Ack(ctx context.Context, topic, group, receiptID string, forwa
 		}
 		slog.Debug("forwarding ack", "topic", topic, "group", group, "receiptId", receiptID, "target", target.Address)
 		s.forwarded.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "ack")))
-		return s.forwardAck(ctx, target, topic, group, receiptID)
+		return forwardWithRetry(func() (model.AckResponse, error) {
+			return s.forwardAck(ctx, target, topic, group, receiptID)
+		})
 	}
 
 	ok, err := s.store.AckDelivery(ctx, receiptID)
@@ -244,6 +250,22 @@ func (s *Service) Ack(ctx context.Context, topic, group, receiptID string, forwa
 		attribute.String("group", group),
 	))
 	return model.AckResponse{ReceiptID: receiptID, Acknowledged: true}, nil
+}
+
+// forwardRetryDelays controls the back-off between peer forward attempts.
+var forwardRetryDelays = []time.Duration{100 * time.Millisecond, 300 * time.Millisecond}
+
+func forwardWithRetry[T any](fn func() (T, error)) (T, error) {
+	result, err := fn()
+	for i, d := range forwardRetryDelays {
+		if err == nil {
+			return result, nil
+		}
+		_ = i
+		time.Sleep(d)
+		result, err = fn()
+	}
+	return result, err
 }
 
 func (s *Service) forwardSend(ctx context.Context, target storage.BrokerEntity, topic string, req model.SendRequest) (model.SendResponse, error) {
