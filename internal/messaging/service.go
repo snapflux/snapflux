@@ -267,7 +267,7 @@ func (s *Service) forwardSend(ctx context.Context, target storage.BrokerEntity, 
 		slog.Error("forward send failed", "topic", topic, "target", target.Address, "error", err)
 		return model.SendResponse{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		slog.Error("forward send upstream error", "topic", topic, "target", target.Address, "status", resp.StatusCode)
 		return model.SendResponse{}, fmt.Errorf("%w: upstream returned %d", ErrServiceUnavailable, resp.StatusCode)
@@ -293,7 +293,7 @@ func (s *Service) forwardReceive(ctx context.Context, target storage.BrokerEntit
 		slog.Error("forward receive failed", "topic", topic, "group", group, "target", target.Address, "error", err)
 		return nil, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("forward receive upstream error", "topic", topic, "group", group, "target", target.Address, "status", resp.StatusCode)
 		return nil, fmt.Errorf("%w: upstream returned %d", ErrServiceUnavailable, resp.StatusCode)
@@ -319,7 +319,7 @@ func (s *Service) forwardAck(ctx context.Context, target storage.BrokerEntity, t
 		slog.Error("forward ack failed", "topic", topic, "group", group, "receiptId", receiptID, "target", target.Address, "error", err)
 		return model.AckResponse{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("forward ack upstream error", "topic", topic, "group", group, "receiptId", receiptID, "target", target.Address, "status", resp.StatusCode)
 		return model.AckResponse{}, fmt.Errorf("%w: upstream returned %d", ErrServiceUnavailable, resp.StatusCode)

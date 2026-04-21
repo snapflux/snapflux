@@ -361,7 +361,7 @@ func (p *Provider) SubscribeToInserts(callback func()) (func(), error) {
 
 	ctx, cancel := context.WithCancel(p.bgCtx)
 	go func() {
-		defer cs.Close(context.Background())
+		defer func() { _ = cs.Close(context.Background()) }()
 		for cs.Next(ctx) {
 			callback()
 		}
