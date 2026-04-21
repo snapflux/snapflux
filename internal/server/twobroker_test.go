@@ -250,18 +250,32 @@ func TestTwoBrokersForwardSend(t *testing.T) {
 	})
 
 	forwardKey := findForwardKey(t, n1, n2)
+	ctx := context.Background()
 
-	// Send to n1 with a key that hashes to n2.
-	sr := httpSend(t, n1.url, "routed", model.SendRequest{Key: forwardKey, Body: "forwarded-body"})
+	// Subscribe before sending so that a delivery is created at send time.
+	// Without this, the batch flush may run before the subscription exists
+	// and no delivery would ever be created for this consumer group.
+	if _, err := n2.svc.Receive(ctx, "routed", "consumers", 0, true); err != nil {
+		t.Fatalf("prime subscription: %v", err)
+	}
+
+	// Use strict durability: message and delivery are written synchronously on
+	// the owning node, so there is no batch-flush timing race.
+	sr := httpSend(t, n1.url, "routed", model.SendRequest{
+		Key:        forwardKey,
+		Body:       "forwarded-body",
+		Durability: model.DurabilityStrict,
+	})
 	if sr.ID == "" {
 		t.Fatal("forward send returned empty ID")
 	}
 
-	// Receive from n2 directly (bypassing routing) to confirm message arrived.
+	// Pull via the service directly (forwarded=true) so receive routing does
+	// not introduce a second forwarding hop that could obscure send failures.
 	var msgs []model.MessageResponse
 	waitFor(t, 3*time.Second, func() bool {
-		msgs = httpReceive(t, n2.url, "routed", "consumers")
-		return len(msgs) == 1
+		msgs, _ = n2.svc.Receive(ctx, "routed", "consumers", 10, true)
+		return len(msgs) >= 1
 	})
 	if msgs[0].Key != forwardKey {
 		t.Errorf("wrong key: got %q want %q", msgs[0].Key, forwardKey)
