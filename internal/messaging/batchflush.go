@@ -2,15 +2,17 @@ package messaging
 
 import (
 	"context"
+	"crypto/rand"
 	"log/slog"
 	"sync"
 	"time"
 
-	"crypto/rand"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 
-	"snapflux/api-service-go/internal/config"
-	"snapflux/api-service-go/internal/storage"
-	"snapflux/api-service-go/internal/wal"
+	"vinr.eu/snapflux/internal/config"
+	"vinr.eu/snapflux/internal/storage"
+	"vinr.eu/snapflux/internal/wal"
 )
 
 type flushEntry struct {
@@ -30,10 +32,33 @@ type BatchFlush struct {
 	queue       []flushEntry
 	flushing    bool
 	cancelTimer context.CancelFunc
+
+	flushCount    metric.Int64Counter
+	flushDuration metric.Float64Histogram
+	flushSize     metric.Int64Histogram
 }
 
 func NewBatchFlush(store storage.Provider, walSvc *wal.WAL, cfg *config.Config) *BatchFlush {
-	return &BatchFlush{store: store, walSvc: walSvc, cfg: cfg}
+	b := &BatchFlush{store: store, walSvc: walSvc, cfg: cfg}
+	meter := otel.GetMeterProvider().Meter("snapflux/batch")
+	b.flushCount, _ = meter.Int64Counter("snapflux.batch.flushes",
+		metric.WithDescription("Total batch flush operations"))
+	b.flushDuration, _ = meter.Float64Histogram("snapflux.batch.flush.duration",
+		metric.WithDescription("Batch flush duration"),
+		metric.WithUnit("s"))
+	b.flushSize, _ = meter.Int64Histogram("snapflux.batch.flush.size",
+		metric.WithDescription("Messages per batch flush"))
+	_, _ = meter.Int64ObservableGauge("snapflux.batch.queue.depth",
+		metric.WithDescription("Current number of messages waiting to be flushed"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			b.mu.Lock()
+			depth := int64(len(b.queue))
+			b.mu.Unlock()
+			o.Observe(depth)
+			return nil
+		}),
+	)
+	return b
 }
 
 func (b *BatchFlush) Start(ctx context.Context, pendingEntries []wal.Entry) error {
@@ -111,7 +136,12 @@ func (b *BatchFlush) flush(ctx context.Context) {
 	b.mu.Unlock()
 
 	slog.Debug("flushing batch", "count", len(batch))
-	if err := b.flushEntries(ctx, batch); err != nil {
+	start := time.Now()
+	err := b.flushEntries(ctx, batch)
+	b.flushCount.Add(ctx, 1)
+	b.flushDuration.Record(ctx, time.Since(start).Seconds())
+	b.flushSize.Record(ctx, int64(len(batch)))
+	if err != nil {
 		slog.Error("batch flush failed — re-queuing entries", "error", err)
 		b.mu.Lock()
 		b.queue = append(batch, b.queue...)

@@ -8,20 +8,29 @@ import (
 	"syscall"
 	"time"
 
-	"snapflux/api-service-go/internal/broker"
-	"snapflux/api-service-go/internal/config"
-	"snapflux/api-service-go/internal/messaging"
-	"snapflux/api-service-go/internal/server"
-	storagepkg "snapflux/api-service-go/internal/storage"
-	"snapflux/api-service-go/internal/storage/memory"
-	"snapflux/api-service-go/internal/storage/mongodb"
-	"snapflux/api-service-go/internal/wal"
+	"vinr.eu/snapflux/internal/broker"
+	"vinr.eu/snapflux/internal/config"
+	"vinr.eu/snapflux/internal/messaging"
+	"vinr.eu/snapflux/internal/server"
+	storagepkg "vinr.eu/snapflux/internal/storage"
+	"vinr.eu/snapflux/internal/storage/memory"
+	"vinr.eu/snapflux/internal/storage/mongodb"
+	"vinr.eu/snapflux/internal/telemetry"
+	"vinr.eu/snapflux/internal/wal"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	cfg := config.Load()
+
+	ctx := context.Background()
+
+	telShutdown, metricsHandler, err := telemetry.Setup(ctx)
+	if err != nil {
+		slog.Error("failed to initialize telemetry", "error", err)
+		os.Exit(1)
+	}
 
 	var store storagepkg.Provider
 	if cfg.DatabaseURL != "" {
@@ -31,8 +40,6 @@ func main() {
 		slog.Info("storage backend selected", "type", "memory")
 		store = memory.New()
 	}
-
-	ctx := context.Background()
 
 	if err := store.Connect(ctx, cfg.DatabaseURL); err != nil {
 		slog.Error("failed to connect to storage", "error", err)
@@ -64,7 +71,7 @@ func main() {
 	}
 
 	msgSvc := messaging.NewService(store, brokerSvc, batchFlush, walSvc, cfg)
-	srv := server.New(msgSvc, store, brokerSvc, walSvc, cfg)
+	srv := server.New(msgSvc, store, brokerSvc, walSvc, cfg, metricsHandler)
 
 	go func() {
 		if err := srv.Start(); err != nil {
@@ -86,6 +93,7 @@ func main() {
 	batchFlush.Stop(shutdownCtx)
 	_ = walSvc.Close()
 	_ = store.Close(shutdownCtx)
+	_ = telShutdown(shutdownCtx)
 
 	slog.Info("shutdown complete")
 }

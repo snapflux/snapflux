@@ -12,11 +12,17 @@ import (
 	"net/url"
 	"time"
 
-	"snapflux/api-service-go/internal/broker"
-	"snapflux/api-service-go/internal/config"
-	"snapflux/api-service-go/internal/model"
-	"snapflux/api-service-go/internal/storage"
-	"snapflux/api-service-go/internal/wal"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
+	"vinr.eu/snapflux/internal/broker"
+	"vinr.eu/snapflux/internal/config"
+	"vinr.eu/snapflux/internal/model"
+	"vinr.eu/snapflux/internal/storage"
+	"vinr.eu/snapflux/internal/wal"
 )
 
 var (
@@ -31,20 +37,44 @@ type Service struct {
 	walSvc     *wal.WAL
 	cfg        *config.Config
 	httpClient *http.Client
+	tracer     trace.Tracer
+	sent       metric.Int64Counter
+	received   metric.Int64Counter
+	acked      metric.Int64Counter
+	forwarded  metric.Int64Counter
 }
 
 func NewService(store storage.Provider, brokerSvc *broker.Broker, batch *BatchFlush, walSvc *wal.WAL, cfg *config.Config) *Service {
-	return &Service{
+	meter := otel.GetMeterProvider().Meter("snapflux/messaging")
+	s := &Service{
 		store:      store,
 		broker:     brokerSvc,
 		batch:      batch,
 		walSvc:     walSvc,
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
+		tracer:     otel.GetTracerProvider().Tracer("snapflux/messaging"),
 	}
+	s.sent, _ = meter.Int64Counter("snapflux.messages.sent",
+		metric.WithDescription("Total messages sent"))
+	s.received, _ = meter.Int64Counter("snapflux.messages.received",
+		metric.WithDescription("Total messages received"))
+	s.acked, _ = meter.Int64Counter("snapflux.messages.acked",
+		metric.WithDescription("Total messages acknowledged"))
+	s.forwarded, _ = meter.Int64Counter("snapflux.messages.forwarded",
+		metric.WithDescription("Total messages forwarded to peer brokers"))
+	return s
 }
 
 func (s *Service) Send(ctx context.Context, topic, key string, body any, forwarded bool, durability model.Durability) (model.SendResponse, error) {
+	ctx, span := s.tracer.Start(ctx, "snapflux.send",
+		trace.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("durability", string(durability)),
+		),
+	)
+	defer span.End()
+
 	if durability == "" {
 		durability = model.DurabilityDurable
 	}
@@ -52,9 +82,12 @@ func (s *Service) Send(ctx context.Context, topic, key string, body any, forward
 	if !forwarded && !s.broker.IsSelf(key) {
 		target, err := s.broker.GetNode(key)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return model.SendResponse{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 		}
 		slog.Debug("forwarding send", "topic", topic, "key", key, "target", target.Address)
+		s.forwarded.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "send")))
 		return s.forwardSend(ctx, target, topic, model.SendRequest{Key: key, Body: body, Durability: durability})
 	}
 
@@ -62,17 +95,27 @@ func (s *Service) Send(ctx context.Context, topic, key string, body any, forward
 
 	if durability == model.DurabilityStrict {
 		if err := s.store.SendMessage(ctx, msgID, topic, key, body); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return model.SendResponse{}, err
 		}
 		groups, err := s.store.GetSubscriptions(ctx, topic)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return model.SendResponse{}, err
 		}
 		if len(groups) > 0 {
 			if err := s.store.CreateDeliveries(ctx, msgID, topic, groups, s.cfg.MaxDeliveryAttempts); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				return model.SendResponse{}, err
 			}
 		}
+		s.sent.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("durability", string(durability)),
+		))
 		return model.SendResponse{ID: msgID, Durability: durability}, nil
 	}
 
@@ -80,6 +123,10 @@ func (s *Service) Send(ctx context.Context, topic, key string, body any, forward
 
 	if durability == model.DurabilityFireAndForget {
 		s.batch.Enqueue(nil, msgID, topic, key, body, ts)
+		s.sent.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("durability", string(durability)),
+		))
 		return model.SendResponse{ID: msgID, Durability: durability}, nil
 	}
 
@@ -89,6 +136,8 @@ func (s *Service) Send(ctx context.Context, topic, key string, body any, forward
 		Durability: string(durability), Timestamp: ts,
 	})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, wal.ErrBackpressure) {
 			slog.Warn("WAL backpressure — rejecting send", "topic", topic, "key", key)
 			return model.SendResponse{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
@@ -96,26 +145,45 @@ func (s *Service) Send(ctx context.Context, topic, key string, body any, forward
 		return model.SendResponse{}, err
 	}
 	s.batch.Enqueue(&walEntry, msgID, topic, key, body, ts)
+	s.sent.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("topic", topic),
+		attribute.String("durability", string(durability)),
+	))
 	return model.SendResponse{ID: msgID, Durability: durability}, nil
 }
 
 func (s *Service) Receive(ctx context.Context, topic, group string, limit int, forwarded bool) ([]model.MessageResponse, error) {
+	ctx, span := s.tracer.Start(ctx, "snapflux.receive",
+		trace.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("group", group),
+		),
+	)
+	defer span.End()
+
 	routeKey := topic + ":" + group
 	if !forwarded && !s.broker.IsSelf(routeKey) {
 		target, err := s.broker.GetNode(routeKey)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 		}
 		slog.Debug("forwarding receive", "topic", topic, "group", group, "target", target.Address)
+		s.forwarded.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "receive")))
 		return s.forwardReceive(ctx, target, topic, group, limit)
 	}
 
 	if err := s.store.UpsertSubscription(ctx, topic, group); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	deliveries, err := s.store.ReceiveDeliveries(ctx, topic, group, limit, s.cfg.VisibilityTimeoutMs)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -130,27 +198,51 @@ func (s *Service) Receive(ctx context.Context, topic, group string, limit int, f
 			SentAt:    d.SentAt.UTC().Format(time.RFC3339Nano),
 		}
 	}
+	s.received.Add(ctx, int64(len(result)), metric.WithAttributes(
+		attribute.String("topic", topic),
+		attribute.String("group", group),
+	))
 	return result, nil
 }
 
 func (s *Service) Ack(ctx context.Context, topic, group, receiptID string, forwarded bool) (model.AckResponse, error) {
+	ctx, span := s.tracer.Start(ctx, "snapflux.ack",
+		trace.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("group", group),
+		),
+	)
+	defer span.End()
+
 	routeKey := topic + ":" + group
 	if !forwarded && !s.broker.IsSelf(routeKey) {
 		target, err := s.broker.GetNode(routeKey)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return model.AckResponse{}, fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 		}
 		slog.Debug("forwarding ack", "topic", topic, "group", group, "receiptId", receiptID, "target", target.Address)
+		s.forwarded.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "ack")))
 		return s.forwardAck(ctx, target, topic, group, receiptID)
 	}
 
 	ok, err := s.store.AckDelivery(ctx, receiptID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return model.AckResponse{}, err
 	}
 	if !ok {
-		return model.AckResponse{}, fmt.Errorf("%w: receipt not found or already acknowledged", ErrNotFound)
+		err = fmt.Errorf("%w: receipt not found or already acknowledged", ErrNotFound)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return model.AckResponse{}, err
 	}
+	s.acked.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("topic", topic),
+		attribute.String("group", group),
+	))
 	return model.AckResponse{ReceiptID: receiptID, Acknowledged: true}, nil
 }
 
@@ -166,6 +258,9 @@ func (s *Service) forwardSend(ctx context.Context, target storage.BrokerEntity, 
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Snapflux-Hop", "1")
+	if s.cfg.BrokerAuthKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+s.cfg.BrokerAuthKey)
+	}
 
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
@@ -189,6 +284,9 @@ func (s *Service) forwardReceive(ctx context.Context, target storage.BrokerEntit
 		return nil, err
 	}
 	httpReq.Header.Set("X-Snapflux-Hop", "1")
+	if s.cfg.BrokerAuthKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+s.cfg.BrokerAuthKey)
+	}
 
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
@@ -212,6 +310,9 @@ func (s *Service) forwardAck(ctx context.Context, target storage.BrokerEntity, t
 		return model.AckResponse{}, err
 	}
 	httpReq.Header.Set("X-Snapflux-Hop", "1")
+	if s.cfg.BrokerAuthKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+s.cfg.BrokerAuthKey)
+	}
 
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sort"
 
-	"snapflux/api-service-go/internal/storage"
+	"vinr.eu/snapflux/internal/storage"
 )
 
 const virtualNodes = 150

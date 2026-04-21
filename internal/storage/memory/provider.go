@@ -7,7 +7,7 @@ import (
 
 	"crypto/rand"
 
-	"snapflux/api-service-go/internal/storage"
+	"vinr.eu/snapflux/internal/storage"
 )
 
 type Provider struct {

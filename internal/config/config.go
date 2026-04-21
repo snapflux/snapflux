@@ -3,12 +3,20 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
-	Port                 string
-	BrokerAddress        string
-	DatabaseURL          string
+	Port          string
+	BrokerAddress string
+	DatabaseURL   string
+	// AuthKeys maps client name → API key. Empty means auth is disabled.
+	// Env: AUTH_KEYS=name:key,name:key,...
+	AuthKeys map[string]string
+	// BrokerAuthKey is the Bearer token this broker sends when forwarding
+	// requests to peer nodes, and is validated independently of AuthKeys.
+	// Env: BROKER_AUTH_KEY=key
+	BrokerAuthKey        string
 	MessageTTLSeconds    int
 	VisibilityTimeoutMs  int
 	MaxDeliveryAttempts  int
@@ -40,6 +48,8 @@ func Load() *Config {
 		WALMaxBytes:          int64(envInt("WAL_MAX_BYTES", 104857600)),
 		WALHighWaterPct:      envInt("WAL_HIGH_WATER_PCT", 80),
 		WALLowWaterPct:       envInt("WAL_LOW_WATER_PCT", 40),
+		AuthKeys:             envAuthKeys("AUTH_KEYS"),
+		BrokerAuthKey:        env("BROKER_AUTH_KEY", ""),
 	}
 }
 
@@ -48,6 +58,23 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envAuthKeys parses "name:key,name:key,..." into a map[name]key.
+func envAuthKeys(key string) map[string]string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	m := make(map[string]string)
+	for _, pair := range strings.Split(v, ",") {
+		pair = strings.TrimSpace(pair)
+		name, token, ok := strings.Cut(pair, ":")
+		if ok && name != "" && token != "" {
+			m[strings.TrimSpace(name)] = strings.TrimSpace(token)
+		}
+	}
+	return m
 }
 
 func envInt(key string, def int) int {

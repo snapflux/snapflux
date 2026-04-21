@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"snapflux/api-service-go/internal/config"
-	"snapflux/api-service-go/internal/storage"
+	"vinr.eu/snapflux/internal/config"
+	"vinr.eu/snapflux/internal/storage"
 )
 
 type Requeue struct {

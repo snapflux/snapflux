@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -10,7 +11,10 @@ import (
 	"strings"
 	"sync"
 
-	"snapflux/api-service-go/internal/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+
+	"vinr.eu/snapflux/internal/config"
 )
 
 type Entry struct {
@@ -38,6 +42,10 @@ type WAL struct {
 	checkpointSeq int
 	currentBytes  int64
 	accepting     bool
+
+	appends            metric.Int64Counter
+	acknowledges       metric.Int64Counter
+	backpressureEvents metric.Int64Counter
 }
 
 func New(cfg *config.Config) (*WAL, []Entry, error) {
@@ -72,6 +80,25 @@ func New(cfg *config.Config) (*WAL, []Entry, error) {
 	w.fd = fd
 	w.accepting = w.currentBytes < w.highWaterBytes
 
+	meter := otel.GetMeterProvider().Meter("snapflux/wal")
+	w.appends, _ = meter.Int64Counter("snapflux.wal.appends",
+		metric.WithDescription("Total WAL entries appended"))
+	w.acknowledges, _ = meter.Int64Counter("snapflux.wal.acknowledges",
+		metric.WithDescription("Total WAL checkpoints advanced"))
+	w.backpressureEvents, _ = meter.Int64Counter("snapflux.wal.backpressure.events",
+		metric.WithDescription("Number of times WAL entered backpressure"))
+	_, _ = meter.Int64ObservableGauge("snapflux.wal.bytes",
+		metric.WithDescription("Current WAL file size in bytes"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			w.mu.Lock()
+			b := w.currentBytes
+			w.mu.Unlock()
+			o.Observe(b)
+			return nil
+		}),
+	)
+
 	slog.Info("WAL ready", "pending", len(pending), "bytes", w.currentBytes, "accepting", w.accepting)
 	return w, pending, nil
 }
@@ -101,6 +128,7 @@ func (w *WAL) Append(entry Entry) (Entry, error) {
 
 	w.currentBytes += int64(len(line))
 	w.updateBackpressure()
+	w.appends.Add(context.Background(), 1)
 	return entry, nil
 }
 
@@ -115,6 +143,7 @@ func (w *WAL) Acknowledge(lastSeq int) error {
 	if err := os.WriteFile(w.checkpointFile, []byte(strconv.Itoa(lastSeq)), 0644); err != nil {
 		return err
 	}
+	w.acknowledges.Add(context.Background(), 1)
 	if w.currentBytes >= w.lowWaterBytes {
 		return w.compact()
 	}
@@ -225,6 +254,7 @@ func (w *WAL) updateBackpressure() {
 		slog.Info("WAL drained below low-water mark — resuming writes")
 	} else if w.accepting && w.currentBytes >= w.highWaterBytes {
 		w.accepting = false
+		w.backpressureEvents.Add(context.Background(), 1)
 		slog.Warn("WAL high-water mark reached — entering backpressure", "bytes", w.currentBytes, "limit", w.highWaterBytes)
 	}
 }

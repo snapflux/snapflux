@@ -2,14 +2,16 @@ package broker
 
 import (
 	"context"
+	"crypto/rand"
 	"log/slog"
 	"os"
 	"time"
 
-	"crypto/rand"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 
-	"snapflux/api-service-go/internal/config"
-	"snapflux/api-service-go/internal/storage"
+	"vinr.eu/snapflux/internal/config"
+	"vinr.eu/snapflux/internal/storage"
 )
 
 type Broker struct {
@@ -19,10 +21,29 @@ type Broker struct {
 	address      string
 	ring         *HashRing
 	cancelTimers context.CancelFunc
+
+	heartbeats     metric.Int64Counter
+	evictions      metric.Int64Counter
+	ringRecomputes metric.Int64Counter
 }
 
 func New(store storage.Provider, cfg *config.Config) *Broker {
-	return &Broker{store: store, cfg: cfg}
+	b := &Broker{store: store, cfg: cfg}
+	meter := otel.GetMeterProvider().Meter("snapflux/broker")
+	b.heartbeats, _ = meter.Int64Counter("snapflux.broker.heartbeats",
+		metric.WithDescription("Total heartbeats sent"))
+	b.evictions, _ = meter.Int64Counter("snapflux.broker.evictions",
+		metric.WithDescription("Total stale brokers evicted"))
+	b.ringRecomputes, _ = meter.Int64Counter("snapflux.broker.ring.recomputes",
+		metric.WithDescription("Total hash ring recomputations"))
+	_, _ = meter.Int64ObservableGauge("snapflux.broker.nodes",
+		metric.WithDescription("Current number of active broker nodes in the ring"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(b.NodeCount()))
+			return nil
+		}),
+	)
+	return b
 }
 
 func (b *Broker) Start(ctx context.Context) error {
@@ -93,6 +114,8 @@ func (b *Broker) runHeartbeat(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 			if err := b.store.UpdateHeartbeat(context.Background(), b.id); err != nil {
 				slog.Error("heartbeat failed", "error", err)
+			} else {
+				b.heartbeats.Add(context.Background(), 1)
 			}
 		}
 	}
@@ -133,7 +156,9 @@ func (b *Broker) evictAndRecompute() {
 	}
 
 	b.ring = newHashRing(brokers)
+	b.ringRecomputes.Add(ctx, 1)
 	if len(evicted) > 0 {
+		b.evictions.Add(ctx, int64(len(evicted)))
 		slog.Warn("evicted stale brokers — ring recomputed", "evicted", len(evicted), "nodes", len(brokers))
 	} else {
 		slog.Info("new brokers detected — ring recomputed", "nodes", len(brokers))

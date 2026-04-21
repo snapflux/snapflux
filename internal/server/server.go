@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"strconv"
 
-	"snapflux/api-service-go/internal/broker"
-	"snapflux/api-service-go/internal/config"
-	"snapflux/api-service-go/internal/messaging"
-	"snapflux/api-service-go/internal/model"
-	"snapflux/api-service-go/internal/storage"
-	"snapflux/api-service-go/internal/wal"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+	"vinr.eu/snapflux/internal/auth"
+	"vinr.eu/snapflux/internal/broker"
+	"vinr.eu/snapflux/internal/config"
+	"vinr.eu/snapflux/internal/messaging"
+	"vinr.eu/snapflux/internal/model"
+	"vinr.eu/snapflux/internal/storage"
+	"vinr.eu/snapflux/internal/wal"
 )
 
 type Server struct {
@@ -24,14 +27,21 @@ type Server struct {
 	walSvc *wal.WAL
 }
 
-func New(msgSvc *messaging.Service, store storage.Provider, brokerSvc *broker.Broker, walSvc *wal.WAL, cfg *config.Config) *Server {
+func New(msgSvc *messaging.Service, store storage.Provider, brokerSvc *broker.Broker, walSvc *wal.WAL, cfg *config.Config, metricsHandler http.Handler) *Server {
 	s := &Server{msgSvc: msgSvc, store: store, broker: brokerSvc, walSvc: walSvc}
 
+	guard := auth.New(cfg.AuthKeys, cfg.BrokerAuthKey).Protect
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/topics/{topic}/messages", s.handleSend)
-	mux.HandleFunc("GET /v1/topics/{topic}/messages", s.handleReceive)
-	mux.HandleFunc("DELETE /v1/topics/{topic}/messages/{receiptId}", s.handleAck)
-	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.Handle("POST /v1/topics/{topic}/messages",
+		otelhttp.NewHandler(guard(http.HandlerFunc(s.handleSend)), "POST /v1/topics/{topic}/messages"))
+	mux.Handle("GET /v1/topics/{topic}/messages",
+		otelhttp.NewHandler(guard(http.HandlerFunc(s.handleReceive)), "GET /v1/topics/{topic}/messages"))
+	mux.Handle("DELETE /v1/topics/{topic}/messages/{receiptId}",
+		otelhttp.NewHandler(guard(http.HandlerFunc(s.handleAck)), "DELETE /v1/topics/{topic}/messages/{receiptId}"))
+	mux.Handle("GET /health",
+		otelhttp.NewHandler(http.HandlerFunc(s.handleHealth), "GET /health"))
+	mux.Handle("GET /metrics", metricsHandler)
 
 	s.srv = &http.Server{Addr: ":" + cfg.Port, Handler: mux}
 	return s
