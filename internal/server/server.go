@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -43,9 +44,18 @@ func New(msgSvc *messaging.Service, store storage.Provider, brokerSvc *broker.Br
 		otelhttp.NewHandler(http.HandlerFunc(s.handleHealth), "GET /health"))
 	mux.Handle("GET /metrics", metricsHandler)
 
-	s.srv = &http.Server{Addr: ":" + cfg.Port, Handler: mux}
+	s.srv = &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	return s
 }
+
+func (s *Server) Handler() http.Handler { return s.srv.Handler }
 
 func (s *Server) Start() error {
 	slog.Info("server listening", "addr", s.srv.Addr)
@@ -63,6 +73,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	topic := r.PathValue("topic")
 	forwarded := r.Header.Get("X-Snapflux-Hop") != ""
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 	var req model.SendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

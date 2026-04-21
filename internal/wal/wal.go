@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -211,38 +212,61 @@ func (w *WAL) replay() ([]Entry, error) {
 }
 
 func (w *WAL) compact() error {
-	content, err := os.ReadFile(w.walFile)
+	tmpPath := w.walFile + ".tmp"
+
+	src, err := os.Open(w.walFile)
 	if err != nil {
 		return err
 	}
 
-	var kept []string
-	for _, line := range strings.Split(string(content), "\n") {
-		line = strings.TrimSpace(line)
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		_ = src.Close()
+		return err
+	}
+
+	var kept int64
+	scanner := bufio.NewScanner(src)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
 		var e Entry
 		if json.Unmarshal([]byte(line), &e) == nil && e.Seq > w.checkpointSeq {
-			kept = append(kept, line)
+			if _, err := tmp.WriteString(line + "\n"); err != nil {
+				_ = src.Close()
+				_ = tmp.Close()
+				_ = os.Remove(tmpPath)
+				return err
+			}
+			kept += int64(len(line)) + 1
 		}
 	}
-
-	compacted := ""
-	if len(kept) > 0 {
-		compacted = strings.Join(kept, "\n") + "\n"
-	}
-
-	_ = w.fd.Close()
-	if err := os.WriteFile(w.walFile, []byte(compacted), 0644); err != nil {
+	_ = src.Close()
+	if err := scanner.Err(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = tmp.Close()
+	_ = w.fd.Close()
+
+	if err := os.Rename(tmpPath, w.walFile); err != nil {
+		return err
+	}
+
 	fd, err := os.OpenFile(w.walFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	w.fd = fd
-	w.currentBytes = int64(len(compacted))
+	w.currentBytes = kept
 	w.updateBackpressure()
 	slog.Info("WAL compacted", "bytes", w.currentBytes)
 	return nil

@@ -24,6 +24,7 @@ type Config struct {
 	HeartbeatTimeoutMs   int
 	BatchFlushIntervalMs int
 	BatchFlushSize       int
+	BatchMaxQueueDepth   int
 	RequeueIntervalMs    int
 	WALPath              string
 	WALMaxBytes          int64
@@ -43,6 +44,7 @@ func Load() *Config {
 		HeartbeatTimeoutMs:   envInt("HEARTBEAT_TIMEOUT_MS", 15000),
 		BatchFlushIntervalMs: envInt("BATCH_FLUSH_INTERVAL_MS", 50),
 		BatchFlushSize:       envInt("BATCH_FLUSH_SIZE", 1000),
+		BatchMaxQueueDepth:   envInt("BATCH_MAX_QUEUE_DEPTH", 50000),
 		RequeueIntervalMs:    envInt("REQUEUE_INTERVAL_MS", 10000),
 		WALPath:              env("WAL_PATH", "/tmp/snapflux/wal"),
 		WALMaxBytes:          int64(envInt("WAL_MAX_BYTES", 104857600)),

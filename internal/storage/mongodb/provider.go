@@ -314,7 +314,7 @@ func (p *Provider) ReceiveDeliveries(ctx context.Context, topic, group string, l
 
 func (p *Provider) AckDelivery(ctx context.Context, receiptID string) (bool, error) {
 	res, err := p.deliveries.DeleteOne(ctx, bson.D{
-		{Key: "id", Value: receiptID},
+		{Key: "_id", Value: receiptID},
 		{Key: "status", Value: string(storage.StatusInflight)},
 	})
 	if err != nil {

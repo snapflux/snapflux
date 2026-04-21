@@ -110,6 +110,13 @@ func (b *BatchFlush) Enqueue(walEntry *wal.Entry, id, topic, key string, payload
 		entry.walSeq = walEntry.Seq
 	}
 	b.mu.Lock()
+	// Fire-and-forget messages (no WAL backing) are dropped when the queue is full.
+	// Durable messages are always accepted because the WAL ensures recovery on restart.
+	if walEntry == nil && b.cfg.BatchMaxQueueDepth > 0 && len(b.queue) >= b.cfg.BatchMaxQueueDepth {
+		b.mu.Unlock()
+		slog.Warn("batch queue full — dropping fire-and-forget message", "topic", topic, "id", id)
+		return
+	}
 	b.queue = append(b.queue, entry)
 	shouldFlush := len(b.queue) >= b.cfg.BatchFlushSize
 	b.mu.Unlock()

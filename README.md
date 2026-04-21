@@ -2,7 +2,7 @@
 
 **Kubernetes-native message queue and event store with pluggable storage backends.**
 
-Snapflux is a lightweight, self-hosted message broker designed to run inside a Kubernetes cluster. It exposes a simple HTTP API, distributes messages across nodes using a consistent hash ring, and persists events to your own database — no proprietary cloud service required.
+Snapflux is a production-ready, self-hosted message broker designed to run inside a Kubernetes cluster. It exposes a simple HTTP API, distributes messages across nodes using a consistent hash ring, and persists events to your own database — no proprietary cloud service required.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26.2-00ADD8.svg)](https://golang.org)
