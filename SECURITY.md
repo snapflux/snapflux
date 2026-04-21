@@ -4,7 +4,7 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Please report security issues by emailing **security@snapflux.dev**. Include:
+Please report security issues by emailing **support@vinr.eu**. Include:
 
 - A description of the vulnerability and its potential impact
 - Steps to reproduce or a proof-of-concept
