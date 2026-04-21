@@ -11,26 +11,23 @@ permissions:
   id-token: write  # for keyless signing with cosign
 
 jobs:
-  release:
-    name: Build, push, and release
-    runs-on: ubuntu-latest
+  build-image:
+    name: Build image (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Extract version
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-qemu-action@v3
-
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -44,65 +41,113 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.suffix }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-manifest:
+    name: Merge manifest and sign
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=sha,format=short
 
-      - name: Build and push image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
+      - name: Create and push manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign image
+      - name: Sign manifest
         run: |
-          cosign sign --yes \
-            ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          DIGEST=$(docker buildx imagetools inspect \
+            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }} \
+            --format '{{json .}}' | jq -r '.manifest.digest')
+          cosign sign --yes ghcr.io/${{ github.repository }}@${DIGEST}
 
-      - name: Build release binary (linux/amd64)
-        run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-            -trimpath \
-            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o dist/snapflux-linux-amd64 \
-            ./cmd/api
+  release-binaries:
+    name: Release binaries
+    needs: merge-manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Build release binary (linux/arm64)
-        run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-            -trimpath \
-            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o dist/snapflux-linux-arm64 \
-            ./cmd/api
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
 
-      - name: Build release binary (darwin/amd64)
+      - name: Build binaries
         run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
-            -trimpath \
-            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o dist/snapflux-darwin-amd64 \
-            ./cmd/api
-
-      - name: Build release binary (darwin/arm64)
-        run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
-            -trimpath \
-            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o dist/snapflux-darwin-arm64 \
-            ./cmd/api
+          mkdir dist
+          targets=(
+            "linux   amd64"
+            "linux   arm64"
+            "darwin  amd64"
+            "darwin  arm64"
+          )
+          for t in "${targets[@]}"; do
+            os=$(echo $t | awk '{print $1}')
+            arch=$(echo $t | awk '{print $2}')
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+              -o dist/snapflux-${os}-${arch} \
+              ./cmd/api
+          done
 
       - name: Create checksums
         working-directory: dist

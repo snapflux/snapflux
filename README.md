@@ -5,7 +5,7 @@
 Snapflux is a lightweight, self-hosted message broker designed to run inside a Kubernetes cluster. It exposes a simple HTTP API, distributes messages across nodes using a consistent hash ring, and persists events to your own database — no proprietary cloud service required.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](https://golang.org)
+[![Go](https://img.shields.io/badge/Go-1.26.2-00ADD8.svg)](https://golang.org)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-enabled-f5a800.svg)](https://opentelemetry.io)
 
 ---

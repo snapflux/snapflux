@@ -14,9 +14,9 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -41,14 +41,14 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
@@ -56,9 +56,9 @@ jobs:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -70,18 +70,26 @@ jobs:
         run: govulncheck ./...
 
   docker-build:
-    name: Docker build (validation)
-    runs-on: ubuntu-latest
+    name: Docker build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
