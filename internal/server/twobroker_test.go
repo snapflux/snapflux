@@ -167,7 +167,7 @@ func httpSend(t *testing.T, nodeURL, topic string, req model.SendRequest) model.
 	if err != nil {
 		t.Fatalf("POST /v1/topics/%s/messages: %v", topic, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("unexpected status %d", resp.StatusCode)
 	}
@@ -185,7 +185,7 @@ func httpReceive(t *testing.T, nodeURL, topic, group string) []model.MessageResp
 	if err != nil {
 		t.Fatalf("GET messages: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected status %d", resp.StatusCode)
 	}
@@ -301,7 +301,7 @@ func TestTwoBrokersForwardAck(t *testing.T) {
 	if err != nil || resp.StatusCode > 299 {
 		t.Fatalf("send failed: err=%v status=%v", err, resp)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Receive from n2 directly.
 	var msgs []model.MessageResponse
@@ -322,7 +322,7 @@ func TestTwoBrokersForwardAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ack request: %v", err)
 	}
-	defer ackResp.Body.Close()
+	defer func() { _ = ackResp.Body.Close() }()
 	if ackResp.StatusCode != http.StatusOK {
 		t.Fatalf("ack returned %d", ackResp.StatusCode)
 	}
