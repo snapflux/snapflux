@@ -1,6 +1,6 @@
 module vinr.eu/snapflux
 
-go 1.26.0
+go 1.26.2
 
 require go.mongodb.org/mongo-driver/v2 v2.5.1
 

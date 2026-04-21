@@ -5,7 +5,7 @@ broker-based distribution.
 
 ## Stack
 
-- **Go 1.26**, MongoDB driver
+- **Go 1.26.2**, MongoDB driver
 - Entry point: `cmd/api/main.go`
 - Config: environment variables via `config.Load()` — no config file needed
 
